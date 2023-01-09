@@ -1,11 +1,8 @@
 package exercise1;
 
 import de.hpi.dbs2.ChosenImplementation;
-<<<<<<< HEAD
-=======
 import de.hpi.dbs2.dbms.BlockManager;
 import de.hpi.dbs2.dbms.Relation;
->>>>>>> e7bbd23 (add TPMMS (not working at the moment))
 import de.hpi.dbs2.dbms.*;
 import de.hpi.dbs2.dbms.utils.BlockSorter;
 import de.hpi.dbs2.exercise1.SortOperation;
