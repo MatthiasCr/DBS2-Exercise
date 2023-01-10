@@ -73,8 +73,8 @@ public class HashEquiInnerJoinJava extends InnerJoinOperation {
 			for (Block block : outerBucket) {
 				getBlockManager().load(block);
 			}
-			for(Block innerBlockRef : innerBucket) {
-				Block innerBlock = getBlockManager().load(innerBlockRef);
+			for(Block innerBlock : innerBucket) {
+				getBlockManager().load(innerBlock);
 				for (Block outerBlock : outerBucket) {
 					joinBlocks(
 							swapped ? innerBlock : outerBlock,
@@ -115,22 +115,22 @@ public class HashEquiInnerJoinJava extends InnerJoinOperation {
 				}
 
 				LinkedList<Block> bucket = buckets.get(hash);
-				Block block = bucket.getLast();
+				Block buffer = bucket.getLast();
 
-				if (block.isFull()) {
-					getBlockManager().release(block, true);
-					Block newBlock = getBlockManager().allocate(true);
-					newBlock.append(currentTuple);
-					bucket.addLast(newBlock);
+				if (buffer.isFull()) {
+					getBlockManager().release(buffer, true);
+					Block newBuffer = getBlockManager().allocate(true);
+					newBuffer.append(currentTuple);
+					bucket.addLast(newBuffer);
 				} else {
-					block.append(currentTuple);
+					buffer.append(currentTuple);
 				}
 			}
 			getBlockManager().release(currentBlock, false);
 		}
 		for (int i = 0; i < bucketCount; i++) {
 			Block buffer = buckets.get(i).getLast();
-			if (buffer.isLoaded() && !buffer.isEmpty()) {
+			if (buffer.isLoaded()) {
 				getBlockManager().release(buffer, true);
 			}
 		}
@@ -142,8 +142,8 @@ public class HashEquiInnerJoinJava extends InnerJoinOperation {
 		ArrayList<LinkedList<Block>> buckets = new ArrayList<>(bucketCount);
 		for (int i = 0; i < bucketCount; i++) {
 			LinkedList<Block> bucket = new LinkedList<>();
-			Block block = getBlockManager().allocate(true);
-			bucket.addLast(block);
+			Block buffer = getBlockManager().allocate(true);
+			bucket.addLast(buffer);
 
 			buckets.add(i, bucket);
 		}
