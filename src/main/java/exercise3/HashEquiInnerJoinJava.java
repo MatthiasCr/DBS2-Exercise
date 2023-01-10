@@ -4,12 +4,14 @@ import de.hpi.dbs2.ChosenImplementation;
 import de.hpi.dbs2.dbms.*;
 import de.hpi.dbs2.exercise3.InnerJoinOperation;
 import de.hpi.dbs2.exercise3.JoinAttributePair;
+import de.hpi.dbs2.exercise3.NestedLoopEquiInnerJoin;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.function.Consumer;
 
 @ChosenImplementation(true)
 public class HashEquiInnerJoinJava extends InnerJoinOperation {
@@ -24,7 +26,14 @@ public class HashEquiInnerJoinJava extends InnerJoinOperation {
 	public int estimatedIOCost(
 		@NotNull Relation leftInputRelation, @NotNull Relation rightInputRelation
 	) {
-		throw new UnsupportedOperationException();
+		int bucketCount = getBlockManager().getFreeBlocks() - 1;
+		int rightRelationBucketSize = rightInputRelation.estimatedBlockCount() / bucketCount;
+		int leftRelationBucketSize = leftInputRelation.estimatedBlockCount() / bucketCount;
+
+		if (Math.min(rightRelationBucketSize, leftRelationBucketSize) > getBlockManager().getFreeBlocks() - 2) {
+			throw new RelationSizeExceedsCapacityException();
+		}
+		return 3 * (leftInputRelation.estimatedBlockCount() + rightInputRelation.estimatedBlockCount());
 	}
 
 	@Override
@@ -37,16 +46,96 @@ public class HashEquiInnerJoinJava extends InnerJoinOperation {
 		// calculate a sensible bucket count
 		int bucketCount = getBlockManager().getFreeBlocks() - 1;
 
-		//  - hash relation
-		ArrayList<LinkedList<Block>> bucketsLeftRelation = initializeBucketList(bucketCount);
-		ArrayList<LinkedList<Block>> bucketsRightRelation = initializeBucketList(bucketCount);
-
-		hashRelation(leftInputRelation, bucketsLeftRelation, getJoinAttributePair().getLeftColumnIndex(), bucketCount);
-		hashRelation(rightInputRelation, bucketsRightRelation, getJoinAttributePair().getRightColumnIndex(), bucketCount);
-
-		//  - join hashed blocks
+		// hash relation
+		ArrayList<LinkedList<Block>> bucketsLeftRelation
+				= hashRelation(leftInputRelation, getJoinAttributePair().getLeftColumnIndex(), bucketCount);
+		ArrayList<LinkedList<Block>> bucketsRightRelation
+				= hashRelation(rightInputRelation, getJoinAttributePair().getRightColumnIndex(), bucketCount);
 
 
+		// join hashed blocks
+		int rightRelationBucketSize = rightInputRelation.estimatedBlockCount() / bucketCount;
+		int leftRelationBucketSize = leftInputRelation.estimatedBlockCount() / bucketCount;
+
+		if (Math.min(rightRelationBucketSize, leftRelationBucketSize) > getBlockManager().getFreeBlocks() - 2) {
+			throw new RelationSizeExceedsCapacityException();
+		}
+
+		boolean swapped = rightRelationBucketSize < leftRelationBucketSize;
+		ArrayList<LinkedList<Block>> outerBuckets = (swapped) ? bucketsRightRelation : bucketsLeftRelation;
+		ArrayList<LinkedList<Block>> innerBuckets = (swapped) ? bucketsLeftRelation : bucketsRightRelation;
+
+		TupleAppender tupleAppender = new TupleAppender(outputRelation.getBlockOutput());
+		for(int i = 0; i < bucketCount; i++) {
+			LinkedList<Block> outerBucket = outerBuckets.get(i);
+			LinkedList<Block> innerBucket = innerBuckets.get(i);
+
+			for (Block block : outerBucket) {
+				getBlockManager().load(block);
+			}
+			for(Block innerBlockRef : innerBucket) {
+				Block innerBlock = getBlockManager().load(innerBlockRef);
+				for (Block outerBlock : outerBucket) {
+					joinBlocks(
+							swapped ? innerBlock : outerBlock,
+							swapped ? outerBlock : innerBlock,
+							outputRelation.getColumns(),
+							tupleAppender
+					);
+				}
+				getBlockManager().release(innerBlock, false);
+			}
+			for (Block block : outerBucket) {
+				getBlockManager().release(block, true);
+			}
+		}
+		tupleAppender.close();
+	}
+
+	public ArrayList<LinkedList<Block>> hashRelation(
+			Relation relation,
+			int hashAttrColumnIndex, int bucketCount
+	) {
+		ArrayList<LinkedList<Block>> buckets = initializeBucketList(bucketCount);
+
+		Iterator<Block> relationIter = relation.iterator();
+
+		Block currentBlock;
+		while (relationIter.hasNext()) {
+			currentBlock = relationIter.next();
+			getBlockManager().load(currentBlock);
+			Iterator<Tuple> currentBlockIter = currentBlock.iterator();
+
+			Tuple currentTuple;
+			while (currentBlockIter.hasNext()) {
+				currentTuple = currentBlockIter.next();
+				int hash = currentTuple.get(hashAttrColumnIndex).hashCode() % bucketCount;
+				if (hash < 0) {
+					hash += bucketCount;
+				}
+
+				LinkedList<Block> bucket = buckets.get(hash);
+				Block block = bucket.getLast();
+
+				if (block.isFull()) {
+					getBlockManager().release(block, true);
+					Block newBlock = getBlockManager().allocate(true);
+					newBlock.append(currentTuple);
+					bucket.addLast(newBlock);
+				} else {
+					block.append(currentTuple);
+				}
+			}
+			getBlockManager().release(currentBlock, false);
+		}
+		for (int i = 0; i < bucketCount; i++) {
+			Block buffer = buckets.get(i).getLast();
+			if (buffer.isLoaded() && !buffer.isEmpty()) {
+				getBlockManager().release(buffer, true);
+			}
+		}
+
+		return buckets;
 	}
 
 	public ArrayList<LinkedList<Block>> initializeBucketList(int bucketCount) {
@@ -61,35 +150,32 @@ public class HashEquiInnerJoinJava extends InnerJoinOperation {
 		return buckets;
 	}
 
-	public void hashRelation(
-			Relation relation,
-			ArrayList<LinkedList<Block>> bucketList,
-			int hashAttrColumnIndex, int bucketCount
-	) {
-		Iterator<Block> relationIter = relation.iterator();
 
-		Block currentBlock;
-		while (relationIter.hasNext()) {
-			currentBlock = relationIter.next();
-			getBlockManager().load(currentBlock);
-			Iterator<Tuple> currentBlockIter = currentBlock.iterator();
+	class TupleAppender implements AutoCloseable, Consumer<Tuple> {
 
-			Tuple currentTuple;
-			while (currentBlockIter.hasNext()) {
-				currentTuple = currentBlockIter.next();
-				int hash = currentTuple.get(hashAttrColumnIndex).hashCode() % bucketCount;
+		BlockOutput blockOutput;
 
-				LinkedList<Block> bucket = bucketList.get(hash);
-				Block block = bucket.getLast();
+		TupleAppender(BlockOutput blockOutput) {
+			this.blockOutput = blockOutput;
+		}
 
-				if (block.isFull()) {
-					getBlockManager().release(block, true);
-					Block newBlock = getBlockManager().allocate(true);
-					newBlock.append(currentTuple);
-					bucket.addLast(newBlock);
-				} else {
-					block.append(currentTuple);
-				}
+		Block outputBlock = getBlockManager().allocate(true);
+
+		@Override
+		public void accept(Tuple tuple) {
+			if(outputBlock.isFull()) {
+				blockOutput.move(outputBlock);
+				outputBlock = getBlockManager().allocate(true);
+			}
+			outputBlock.append(tuple);
+		}
+
+		@Override
+		public void close() {
+			if(!outputBlock.isEmpty()) {
+				blockOutput.move(outputBlock);
+			} else {
+				getBlockManager().release(outputBlock, false);
 			}
 		}
 	}
